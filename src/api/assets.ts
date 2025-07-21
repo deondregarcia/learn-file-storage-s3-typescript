@@ -15,11 +15,11 @@ export const mediaTypeToExt = (mediaType: string) => {
     return ".bin";
   }
 
-  return "." + split[1];
+  return split[1];
 };
 
-export const getAssetDiskPath = (cfg: ApiConfig, assetPath: string) => {
-  return path.join(cfg.assetsRoot, assetPath);
+export const createTempPath = (videoKey: string) => {
+  return path.join("/tmp", videoKey);
 };
 
 export const isUnsupportedType = (mediaType: string) => {

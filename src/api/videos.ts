@@ -1,11 +1,11 @@
 import { respondWithJSON } from "./json";
 
 import { type ApiConfig } from "../config";
-import type { BunRequest, S3File } from "bun";
+import type { BunRequest, S3File, BunFile } from "bun";
 import { BadRequestError, UserForbiddenError } from "./errors";
 import { getBearerToken, validateJWT } from "../auth";
 import { getVideo, updateVideo } from "../db/videos";
-import { getAssetDiskPath, mediaTypeToExt } from "./assets";
+import { createTempPath, mediaTypeToExt } from "./assets";
 import crypto from "crypto";
 import { myUploadToS3 } from "../s3";
 import path from "path";
@@ -37,13 +37,11 @@ export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
     throw new BadRequestError("Video must be of type mp4");
   }
 
-  const randomString = crypto.randomBytes(32).toString("base64url");
-  const ext = mediaTypeToExt(video.type);
-  const videoKey = `${randomString}${ext}`;
+  const outputPath = await processVideoForFastStart(video);
 
-  const finalKey = await myUploadToS3(cfg, videoKey, video);
+  await myUploadToS3(cfg, outputPath);
 
-  videoMetaData.videoURL = `https://${cfg.s3Bucket}.s3.${cfg.s3Region}.amazonaws.com/${finalKey}`;
+  videoMetaData.videoURL = `https://${cfg.s3Bucket}.s3.${cfg.s3Region}.amazonaws.com/${outputPath}`;
   updateVideo(cfg.db, videoMetaData);
 
   return respondWithJSON(200, null);
@@ -100,4 +98,50 @@ const determineAspectRatio = (width: number, height: number) => {
   }
 
   return "other";
+};
+
+export const processVideoForFastStart = async (video: File) => {
+  const videoKey = crypto.randomBytes(32).toString("base64url");
+  const tempPath = createTempPath(videoKey);
+
+  await Bun.write(tempPath, video);
+
+  const ext = mediaTypeToExt(video.type);
+  const aspectRatio = await getVideoAspectRatio(tempPath);
+  const outputPath = `${aspectRatio}/${videoKey}.processed.${ext}`;
+
+  const proc = Bun.spawn(
+    [
+      "ffmpeg",
+      "-i",
+      tempPath,
+      "-movflags",
+      "faststart",
+      "-map_metadata",
+      "0",
+      "-codec",
+      "copy",
+      "-f",
+      "mp4",
+      outputPath,
+    ],
+    {
+      stdout: "pipe",
+      stderr: "pipe",
+    }
+  );
+
+  const outputBlob = await proc.stdout.blob();
+
+  const exitCode = await proc.exited;
+  const errorMessage = await proc.stderr.text();
+  if (exitCode !== 0) {
+    throw new Error(`Could not process video: ${errorMessage}`);
+  }
+
+  // create ref to orig file for deletion
+  const originalBunFile = Bun.file(tempPath);
+  await originalBunFile.delete();
+
+  return outputPath;
 };

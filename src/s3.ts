@@ -1,26 +1,17 @@
-import type { S3File } from "bun";
-import { getAssetDiskPath } from "./api/assets";
+import { file, type S3File } from "bun";
+import { createTempPath } from "./api/assets";
 import type { ApiConfig } from "./config";
 import { getVideoAspectRatio } from "./api/videos";
 
-export const myUploadToS3 = async (
-  cfg: ApiConfig,
-  videoKey: string,
-  video: File
-) => {
-  const tempAssetDiskPath = getAssetDiskPath(cfg, videoKey);
-  await Bun.write(tempAssetDiskPath, video);
-  const bunFile = Bun.file(tempAssetDiskPath);
+export const myUploadToS3 = async (cfg: ApiConfig, filePath: string) => {
+  const s3file: S3File = cfg.s3Client.file(filePath, { bucket: cfg.s3Bucket });
+  const bunFile = Bun.file(filePath);
 
-  const aspectRatio = await getVideoAspectRatio(tempAssetDiskPath);
-  const finalKey = `${aspectRatio}/${videoKey}`;
-  const s3file: S3File = cfg.s3Client.file(finalKey, { bucket: cfg.s3Bucket });
   const startTime = process.hrtime.bigint();
   await s3file.write(bunFile, { type: bunFile.type });
   const endTime = process.hrtime.bigint();
+
   await bunFile.delete();
 
-  console.log(`Upload took ${Number(endTime - startTime) / 1000} milliseconds`);
-
-  return finalKey;
+  // console.log(`Upload took ${Number(endTime - startTime) / 1000} milliseconds`);
 };
