@@ -4,12 +4,14 @@ import { type ApiConfig } from "../config";
 import type { BunRequest, S3File, BunFile } from "bun";
 import { BadRequestError, UserForbiddenError } from "./errors";
 import { getBearerToken, validateJWT } from "../auth";
-import { getVideo, updateVideo } from "../db/videos";
+import { getVideo, updateVideo, type Video } from "../db/videos";
 import { createTempPath, mediaTypeToExt } from "./assets";
 import crypto from "crypto";
 import { myUploadToS3 } from "../s3";
+import { rm } from "fs/promises";
 import path from "path";
 import fs from "fs";
+import { cfg } from "../config";
 
 export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
   const { videoId } = req.params as { videoId?: string };
@@ -26,6 +28,7 @@ export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
 
   const formData = await req.formData();
   const video = formData.get("video");
+  // const video = getVideo(cfg.db, videoId);
   const MAX_UPLOAD_SIZE = 1 << 30;
   if (!(video instanceof File)) {
     throw new BadRequestError("Video not found");
@@ -37,12 +40,23 @@ export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
     throw new BadRequestError("Video must be of type mp4");
   }
 
-  const outputPath = await processVideoForFastStart(video);
+  const tempPath = createTempPath(videoId);
 
-  await myUploadToS3(cfg, outputPath);
+  await Bun.write(tempPath, video);
+  const aspectRatio = await getVideoAspectRatio(tempPath);
+  const key = `${aspectRatio}/${videoId}.mp4`;
 
-  videoMetaData.videoURL = `https://${cfg.s3Bucket}.s3.${cfg.s3Region}.amazonaws.com/${outputPath}`;
+  const outputPath = await processVideoForFastStart(tempPath);
+
+  await myUploadToS3(cfg, outputPath, key);
+
+  videoMetaData.videoURL = `${cfg.s3CfDistribution}/${key}`;
   updateVideo(cfg.db, videoMetaData);
+
+  await Promise.all([
+    rm(tempPath, { force: true }),
+    rm(`${tempPath}.processed.mp4`, { force: true }),
+  ]);
 
   return respondWithJSON(200, null);
 }
@@ -100,16 +114,8 @@ const determineAspectRatio = (width: number, height: number) => {
   return "other";
 };
 
-export const processVideoForFastStart = async (video: File) => {
-  const videoKey = crypto.randomBytes(32).toString("base64url");
-  const tempPath = createTempPath(videoKey);
-
-  await Bun.write(tempPath, video);
-
-  const ext = mediaTypeToExt(video.type);
-  const aspectRatio = await getVideoAspectRatio(tempPath);
-  const outputPath = `${aspectRatio}/${videoKey}.processed.${ext}`;
-
+export const processVideoForFastStart = async (tempPath: string) => {
+  const outputPath = `${tempPath}.processed.mp4`;
   const proc = Bun.spawn(
     [
       "ffmpeg",
@@ -126,22 +132,15 @@ export const processVideoForFastStart = async (video: File) => {
       outputPath,
     ],
     {
-      stdout: "pipe",
       stderr: "pipe",
     }
   );
-
-  const outputBlob = await proc.stdout.blob();
 
   const exitCode = await proc.exited;
   const errorMessage = await proc.stderr.text();
   if (exitCode !== 0) {
     throw new Error(`Could not process video: ${errorMessage}`);
   }
-
-  // create ref to orig file for deletion
-  const originalBunFile = Bun.file(tempPath);
-  await originalBunFile.delete();
 
   return outputPath;
 };

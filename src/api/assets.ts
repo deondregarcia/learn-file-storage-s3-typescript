@@ -18,8 +18,8 @@ export const mediaTypeToExt = (mediaType: string) => {
   return split[1];
 };
 
-export const createTempPath = (videoKey: string) => {
-  return path.join("/tmp", videoKey);
+export const createTempPath = (videoId: string) => {
+  return path.join("/tmp", videoId);
 };
 
 export const isUnsupportedType = (mediaType: string) => {
